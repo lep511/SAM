@@ -1,0 +1,56 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  Using an Amazon SQS dead letter queue as en event source, trigger a lambda to replay messages to the main queue.
+
+Parameters:
+  MessageRetentionPeriod:
+    Type: Number
+    Default: 345600
+    Description: "The number of seconds Amazon SQS retains a message. You can specify an integer value from 60 seconds (1 minute) to 1,209,600 seconds (14 days). The default value is 345600 (4 days)."
+
+Resources:
+  ReplayFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/lambda/
+      Handler: replay.lambda_handler
+      Runtime: python3.9
+      Tracing: Active
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !Join [ "-", [ !Ref AWS::StackName, "MainQueue" ] ]
+      Events:
+        MySQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt DLQ.Arn
+            BatchSize: 1
+      Environment:
+        Variables:
+          SQS_MAIN_URL: !Sub "https://sqs.${AWS::Region}.amazonaws.com/${AWS::AccountId}/${AWS::StackName}-MainQueue"
+          MESSAGE_RETENTION_PERIOD: !Ref MessageRetentionPeriod
+    
+  MainQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Join [ "-", [ !Ref AWS::StackName, "MainQueue" ] ]
+      MessageRetentionPeriod: !Ref MessageRetentionPeriod
+      ReceiveMessageWaitTimeSeconds: 5
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DLQ.Arn
+        maxReceiveCount: 1
+
+  DLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Join [ "-", [ !Ref AWS::StackName , "DLQ" ] ]
+      MessageRetentionPeriod: !Ref MessageRetentionPeriod
+
+Outputs:
+  ReplayFunctionArn:
+    Description: "Lambda Function ARN"
+    Value: !GetAtt ReplayFunction.Arn
+  MainQueueUrl:
+    Description: "Main Queue URL"
+    Value: !Sub "https://sqs.${AWS::Region}.amazonaws.com/${AWS::AccountId}/${AWS::StackName}-MainQueue"

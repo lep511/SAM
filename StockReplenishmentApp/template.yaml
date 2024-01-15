@@ -1,0 +1,218 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Sample SAM Template for simple-app
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 128
+    Tracing: Active
+    Environment:
+      Variables:
+        INVENTORY_TABLE: !Ref Inventory
+        EVENT_BUS_NAME: !Ref StockAppBus
+    Layers:
+      - !Sub arn:aws:lambda:${AWS::Region}:017000801446:layer:AWSLambdaPowertoolsPythonV2:47 
+
+Resources:
+  ##################################################################
+  # AWS WAF 
+  # Access Control List limits each IP to 100 requestes per second
+  ##################################################################
+  MyWAFACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      CustomResponseBodies: # Define a response from WAF
+        CountryNotValid:
+          Content: Country not allowed
+          ContentType: TEXT_PLAIN
+      DefaultAction:
+        Block: 
+          CustomResponse: # Choose a defined template to respond when blocked
+            ResponseCode: "403"
+            CustomResponseBodyKey: CountryNotValid
+      Description: Application WAF
+      Scope: REGIONAL
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        MetricName: AppRules
+        SampledRequestsEnabled: true
+      Rules:
+        - Action:
+            Allow: {} # Allow if conditions are met
+          Name: AllowCountryList
+          Priority: 0
+          Statement:
+            GeoMatchStatement:
+              CountryCodes: # Requests from following countries are allowed
+                - US
+                - UY
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: AllowCountryList
+            SampledRequestsEnabled: true
+        #TODO: Chek this rule
+        - Action:
+            Block: {} # Block if conditions are met
+          Name: BlockIpReputationList
+          Priority: 1
+          Statement:
+            ManagedRuleGroupStatement:
+              Name: AWSManagedRulesAmazonIpReputationList
+              VendorName: AWS
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: BlockIpReputationList
+            SampledRequestsEnabled: true
+
+  ####################
+  # API AND FUNCTIONS
+  ####################
+  ApiGatewayApi:
+    Type: AWS::Serverless::Api
+    Properties: 
+      StageName: Prod
+      EndpointConfiguration: REGIONAL
+      TracingEnabled: true
+
+  # Associate the WebACL with the API gateway
+  MyWAFAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties: 
+      ResourceArn: !Sub arn:aws:apigateway:${AWS::Region}::/restapis/${ApiGatewayApi}/stages/Prod
+      WebACLArn: !GetAtt MyWAFACL.Arn
+
+  #############
+  # EVENT BUS 
+  #############
+  StockAppBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: "StockAppBus"
+
+  PurchaseFunction:
+    Type: AWS::Serverless::Function 
+    Properties:
+      CodeUri: purchase/
+      Handler: app.lambda_handler
+      Runtime: python3.10
+      Architectures:
+        - x86_64
+      Policies:
+        - EventBridgePutEventsPolicy:
+            StatementId: EventBridgePutEventsPolicy
+            EventBusName: !Ref StockAppBus
+      Events:
+        AddImage:
+          Type: Api
+          Properties:
+            Path: /purchase
+            Method: post
+            RestApiId: !Ref ApiGatewayApi
+
+  StockFunction:
+    Type: AWS::Serverless::Function 
+    Properties:
+      CodeUri: stock/
+      Handler: app.lambda_handler
+      Runtime: python3.10
+      Architectures:
+        - x86_64
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref Inventory
+      Events:
+        AddImage:
+          Type: Api
+          Properties:
+            Path: /stock
+            Method: get
+            RestApiId: !Ref ApiGatewayApi
+
+  InventoryFunction:
+    Type: AWS::Serverless::Function 
+    Properties:
+      CodeUri: inventory/
+      Handler: app.lambda_handler
+      Runtime: python3.10
+      Architectures:
+        - x86_64
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref Inventory
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref StockAppBus
+      Events:
+        DeliveryEvents:
+          Type: CloudWatchEvent
+          Properties:
+            EventBusName: !Ref StockAppBus
+            Pattern:
+              source: ["StockApp"]
+              detail-type:
+                - Purchase
+                - Replenish
+
+  ReplenishFunction:
+    Type: AWS::Serverless::Function 
+    Properties:
+      CodeUri: replenish/
+      Handler: app.lambda_handler
+      Runtime: python3.10
+      Architectures:
+        - x86_64
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref Inventory
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref StockAppBus
+      Events:
+        DeliveryEvents:
+          Type: CloudWatchEvent
+          Properties:
+            EventBusName: !Ref StockAppBus
+            Pattern:
+              source: ["StockApp"]
+              detail-type:
+                - StockLevel
+
+  #############
+  # DYNAMO TABLE
+  #############
+  Inventory:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Inventory
+      AttributeDefinitions:
+        - AttributeName: Location
+          AttributeType: S
+        - AttributeName: SKU
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: Location
+          KeyType: HASH
+        - AttributeName: SKU
+          KeyType: RANGE  
+
+
+  DynamoDBItems:
+    Type: AWS::Serverless::Function 
+    Properties:
+      CodeUri: dynamoitems/
+      Handler: app.lambda_handler
+      Runtime: python3.10
+      Architectures:
+        - x86_64
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref Inventory
+Outputs:
+  ApiGatewayEndpoint:
+    Description: "API Gateway endpoint URL"
+    Value: !Sub "https://${ApiGatewayApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+
+  TableName:
+    Description: "Dynamo table name"
+    Value: !Ref Inventory

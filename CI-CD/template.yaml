@@ -1,0 +1,169 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Sample SAM Template for simple-app
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 128
+    Environment:
+      Variables:
+        INVENTORY_TABLE: !Ref Inventory
+        EVENT_BUS_NAME: !Ref StockAppBus
+
+Resources:
+  #############
+  # EVENT BUS 
+  #############
+  StockAppBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: "StockAppBus"
+
+
+  #############
+  # API AND FUNCTIONS
+  #############
+  ApiGatewayApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: Prod
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"
+        AllowHeaders:
+          - "*"
+        AllowMethods:
+          - POST
+        AllowCredentials: false
+
+  PurchaseFunction:
+    Type: AWS::Serverless::Function 
+    Properties:
+      CodeUri: purchase/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Architectures:
+        - x86_64
+      Policies:
+        - EventBridgePutEventsPolicy:
+            StatementId: EventBridgePutEventsPolicy
+            EventBusName: !Ref StockAppBus
+      Events:
+        AddImage:
+          Type: HttpApi
+          Properties:
+            Path: /purchase
+            Method: post
+            ApiId: !Ref ApiGatewayApi
+
+  StockFunction:
+    Type: AWS::Serverless::Function 
+    Properties:
+      CodeUri: stock/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Architectures:
+        - x86_64
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref Inventory
+      Events:
+        AddImage:
+          Type: HttpApi
+          Properties:
+            Path: /stock
+            Method: get
+            ApiId: !Ref ApiGatewayApi
+
+  InventoryFunction:
+    Type: AWS::Serverless::Function 
+    Properties:
+      CodeUri: inventory/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Architectures:
+        - x86_64
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref Inventory
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref StockAppBus
+      Events:
+        DeliveryEvents:
+          Type: CloudWatchEvent
+          Properties:
+            EventBusName: !Ref StockAppBus
+            Pattern:
+              source: ["StockApp"]
+              detail-type:
+                - Purchase
+                - Replenish
+
+  ReplenishFunction:
+    Type: AWS::Serverless::Function 
+    Properties:
+      CodeUri: replenish/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Architectures:
+        - x86_64
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref Inventory
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref StockAppBus
+      Events:
+        DeliveryEvents:
+          Type: CloudWatchEvent
+          Properties:
+            EventBusName: !Ref StockAppBus
+            Pattern:
+              source: ["StockApp"]
+              detail-type:
+                - StockLevel
+
+  #############
+  # DYNAMO TABLE
+  #############
+  Inventory:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Inventory
+      AttributeDefinitions:
+        - AttributeName: Location
+          AttributeType: S
+        - AttributeName: SKU
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: Location
+          KeyType: HASH
+        - AttributeName: SKU
+          KeyType: RANGE  
+
+
+  DynamoDBItems:
+    Type: AWS::Serverless::Function 
+    Properties:
+      CodeUri: dynamoitems/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Architectures:
+        - x86_64
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref Inventory
+Outputs:
+  ApiGatewayEndpoint:
+    Description: "API Gateway endpoint URL"
+    Value: !Sub "https://${ApiGatewayApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+
+  TableName:
+    Description: "Dynamo table name"
+    Value: !Ref Inventory
+
+  DynamoDBFunction:
+    Description: "DynamoDB function name"
+    Value: !Ref DynamoDBItems
